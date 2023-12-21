@@ -120,29 +120,29 @@ tonic = { package = "madsim-tonic", version = "0.4.1" }
 tonic-build = { package = "madsim-tonic-build", version = "0.4.2" }
 otlp-embedded = { git = "https://github.com/risingwavelabs/otlp-embedded", rev = "58c1f003484449d7c6dd693b348bf19dd44889cb" }
 prost = { version = "0.12" }
-icelake = { git = "https://github.com/icelake-io/icelake", rev = "3f7b53ba5b563524212c25810345d1314678e7fc", features = [
+icelake = { git = "https://github.com/icelake-io/icelake", rev = "6915f57831aec78283de950337f706d042dad44c", features = [
   "prometheus",
 ] }
-arrow-array = "49"
-arrow-arith = "49"
-arrow-cast = "49"
-arrow-schema = "49"
-arrow-buffer = "49"
-arrow-flight = "49"
-arrow-select = "49"
-arrow-ord = "49"
-arrow-row = "49"
-arrow-array-deltalake = { package = "arrow-array", version = "48.0.1" }
-arrow-buffer-deltalake = { package = "arrow-buffer", version = "48.0.1" }
-arrow-cast-deltalake = { package = "arrow-cast", version = "48.0.1" }
-arrow-schema-deltalake = { package = "arrow-schema", version = "48.0.1" }
+arrow-array = "=49.0.0"
+arrow-arith = "=49.0.0"
+arrow-cast = "=49.0.0"
+arrow-schema = "=49.0.0"
+arrow-buffer = "=49.0.0"
+arrow-flight = "=49.0.0"
+arrow-select = "=49.0.0"
+arrow-ord = "=49.0.0"
+arrow-row = "=49.0.0"
+arrow-array-deltalake = { package = "arrow-array", version = "=48.0.1" }
+arrow-buffer-deltalake = { package = "arrow-buffer", version = "=48.0.1" }
+arrow-cast-deltalake = { package = "arrow-cast", version = "=48.0.1" }
+arrow-schema-deltalake = { package = "arrow-schema", version = "=48.0.1" }
 # Use a forked version which removes the dependencies on dynamo db to reduce
 # compile time and binary size.
 deltalake = { git = "https://github.com/risingwavelabs/delta-rs", rev = "5c2dccd4640490202ffe98adbd13b09cef8e007b", features = [
   "s3-no-concurrent-write",
 ] }
-parquet = "49"
-thiserror-ext = "0.0.11"
+parquet = "=49.0.0"
+thiserror-ext = "0.0.10"
 tikv-jemalloc-ctl = { git = "https://github.com/risingwavelabs/jemallocator.git", rev = "64a2d9" }
 tikv-jemallocator = { git = "https://github.com/risingwavelabs/jemallocator.git", features = [
   "profiling",

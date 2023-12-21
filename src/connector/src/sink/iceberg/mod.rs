@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod jni_catalog;
 mod prometheus;
 
 use std::collections::HashMap;
@@ -21,7 +22,10 @@ use std::ops::Deref;
 use anyhow::anyhow;
 use arrow_schema::{DataType as ArrowDataType, Schema as ArrowSchema, SchemaRef};
 use async_trait::async_trait;
-use icelake::catalog::{load_catalog, CATALOG_NAME, CATALOG_TYPE};
+use icelake::catalog::{
+    load_catalog, load_iceberg_base_catalog_config, BaseCatalogConfig, CatalogRef, CATALOG_NAME,
+    CATALOG_TYPE,
+};
 use icelake::io_v2::input_wrapper::{DeltaWriter, RecordBatchWriter};
 use icelake::io_v2::prometheus::{PrometheusWriterBuilder, WriterMetrics};
 use icelake::io_v2::{
@@ -102,7 +106,12 @@ pub struct IcebergConfig {
         deserialize_with = "deserialize_string_seq_from_string"
     )]
     pub primary_key: Option<Vec<String>>,
+
+    // Props for java catalog props.
+    #[serde(skip)]
+    pub java_catalog_props: HashMap<String, String>,
 }
+
 pub(crate) fn deserialize_string_seq_from_string<'de, D>(
     deserializer: D,
 ) -> std::result::Result<Option<Vec<String>>, D::Error>
@@ -121,8 +130,9 @@ where
 
 impl IcebergConfig {
     pub fn from_hashmap(values: HashMap<String, String>) -> Result<Self> {
-        let config = serde_json::from_value::<IcebergConfig>(serde_json::to_value(values).unwrap())
-            .map_err(|e| SinkError::Config(anyhow!(e)))?;
+        let mut config =
+            serde_json::from_value::<IcebergConfig>(serde_json::to_value(&values).unwrap())
+                .map_err(|e| SinkError::Config(anyhow!(e)))?;
 
         if config.r#type != SINK_TYPE_APPEND_ONLY && config.r#type != SINK_TYPE_UPSERT {
             return Err(SinkError::Config(anyhow!(
@@ -149,23 +159,29 @@ impl IcebergConfig {
             }
         }
 
+        // All configs starts with "catalog." will be treated as java configs.
+        config.java_catalog_props = values
+            .iter()
+            .filter(|(k, _v)| {
+                k.starts_with("catalog.") && k != &"catalog.uri" && k != &"catalog.type"
+            })
+            .map(|(k, v)| (k[8..].to_string(), v.to_string()))
+            .collect();
+
         Ok(config)
+    }
+
+    fn catalog_type(&self) -> &str {
+        self.catalog_type.as_deref().unwrap_or("storage")
     }
 
     fn build_iceberg_configs(&self) -> Result<HashMap<String, String>> {
         let mut iceberg_configs = HashMap::new();
 
-        let catalog_type = self
-            .catalog_type
-            .as_deref()
-            .unwrap_or("storage")
-            .to_string();
+        let catalog_type = self.catalog_type().to_string();
 
         iceberg_configs.insert(CATALOG_TYPE.to_string(), catalog_type.clone());
-        iceberg_configs.insert(
-            CATALOG_NAME.to_string(),
-            self.database_name.clone().to_string(),
-        );
+        iceberg_configs.insert(CATALOG_NAME.to_string(), "risingwave".to_string());
 
         match catalog_type.as_str() {
             "storage" => {
@@ -184,7 +200,7 @@ impl IcebergConfig {
                 return Err(SinkError::Iceberg(anyhow!(
                     "Unsupported catalog type: {}, only support `storage` and `rest`",
                     catalog_type
-                )))
+                )));
             }
         }
 
@@ -234,6 +250,98 @@ impl IcebergConfig {
 
         Ok(iceberg_configs)
     }
+
+    fn build_jni_catalog_configs(&self) -> Result<(BaseCatalogConfig, HashMap<String, String>)> {
+        let mut iceberg_configs = HashMap::new();
+
+        let base_catalog_config = {
+            let catalog_type = self.catalog_type().to_string();
+
+            iceberg_configs.insert(CATALOG_TYPE.to_string(), catalog_type.clone());
+            iceberg_configs.insert(CATALOG_NAME.to_string(), "risingwave".to_string());
+
+            if let Some(region) = &self.region {
+                iceberg_configs.insert(
+                    "iceberg.table.io.region".to_string(),
+                    region.clone().to_string(),
+                );
+            }
+
+            if let Some(endpoint) = &self.endpoint {
+                iceberg_configs.insert(
+                    "iceberg.table.io.endpoint".to_string(),
+                    endpoint.clone().to_string(),
+                );
+            }
+
+            iceberg_configs.insert(
+                "iceberg.table.io.access_key_id".to_string(),
+                self.access_key.clone().to_string(),
+            );
+            iceberg_configs.insert(
+                "iceberg.table.io.secret_access_key".to_string(),
+                self.secret_key.clone().to_string(),
+            );
+
+            let (bucket, root) = {
+                let url = Url::parse(&self.path).map_err(|e| SinkError::Iceberg(anyhow!(e)))?;
+                let bucket = url
+                    .host_str()
+                    .ok_or_else(|| {
+                        SinkError::Iceberg(anyhow!(
+                            "Invalid s3 path: {}, bucket is missing",
+                            self.path
+                        ))
+                    })?
+                    .to_string();
+                let root = url.path().trim_start_matches('/').to_string();
+                (bucket, root)
+            };
+
+            iceberg_configs.insert("iceberg.table.io.bucket".to_string(), bucket);
+            iceberg_configs.insert("iceberg.table.io.root".to_string(), root);
+            // #TODO
+            // Support load config file
+            iceberg_configs.insert(
+                "iceberg.table.io.disable_config_load".to_string(),
+                "true".to_string(),
+            );
+
+            load_iceberg_base_catalog_config(&iceberg_configs)?
+        };
+
+        // Prepare jni configs, for details please see https://iceberg.apache.org/docs/latest/aws/
+        let mut java_catalog_configs = HashMap::new();
+        {
+            if let Some(uri) = self.uri.as_deref() {
+                java_catalog_configs.insert("uri".to_string(), uri.to_string());
+            }
+
+            java_catalog_configs.insert("warehouse".to_string(), self.path.clone());
+            java_catalog_configs.extend(self.java_catalog_props.clone());
+
+            // Currently we only support s3, so let's set it to s3
+            java_catalog_configs.insert(
+                "io-impl".to_string(),
+                "org.apache.iceberg.aws.s3.S3FileIO".to_string(),
+            );
+
+            if let Some(endpoint) = &self.endpoint {
+                iceberg_configs.insert("s3.endpoint".to_string(), endpoint.clone().to_string());
+            }
+
+            iceberg_configs.insert(
+                "s3.access-key-id".to_string(),
+                self.access_key.clone().to_string(),
+            );
+            iceberg_configs.insert(
+                "s3.secret-access-key".to_string(),
+                self.secret_key.clone().to_string(),
+            );
+        }
+
+        Ok((base_catalog_config, java_catalog_configs))
+    }
 }
 
 pub struct IcebergSink {
@@ -261,13 +369,49 @@ impl Debug for IcebergSink {
 }
 
 impl IcebergSink {
+    async fn create_catalog(&self) -> Result<CatalogRef> {
+        match self.config.catalog_type() {
+            "storage" | "rest" => {
+                let iceberg_configs = self.config.build_iceberg_configs()?;
+                let catalog = load_catalog(&iceberg_configs)
+                    .await
+                    .map_err(|e| SinkError::Iceberg(anyhow!(e)))?;
+                Ok(catalog)
+            }
+            catalog_type if catalog_type == "hive" || catalog_type == "sql" || catalog_type == "glue" || catalog_type == "dynamodb" => {
+                // Create java catalog
+                let (base_catalog_config, java_catalog_props) = self.config.build_jni_catalog_configs()?;
+                let catalog_impl = match catalog_type {
+                    "hive" => "org.apache.iceberg.hive.HiveCatalog",
+                    "sql" => "org.apache.iceberg.jdbc.JdbcCatalog",
+                    "glue" => "org.apache.iceberg.aws.glue.GlueCatalog",
+                    "dynamodb" => "org.apache.iceberg.aws.dynamodb.DynamoDbCatalog",
+                    _ => unreachable!(),
+                };
+
+                jni_catalog::JniCatalog::build(base_catalog_config, "risingwave", catalog_impl, java_catalog_props)
+            }
+            _ => {
+                Err(SinkError::Iceberg(anyhow!(
+                    "Unsupported catalog type: {}, only support `storage`, `rest`, `hive`, `sql`, `glue`, `dynamodb`",
+                    self.config.catalog_type()
+                )))
+            }
+        }
+    }
+
     async fn create_table(&self) -> Result<Table> {
-        let catalog = load_catalog(&self.config.build_iceberg_configs()?)
+        let catalog = self
+            .create_catalog()
             .await
             .map_err(|e| SinkError::Iceberg(anyhow!("Unable to load iceberg catalog: {e}")))?;
 
-        let table_id = TableIdentifier::new(self.config.table_name.split('.'))
-            .map_err(|e| SinkError::Iceberg(anyhow!("Unable to parse table name: {e}")))?;
+        let table_id = TableIdentifier::new(
+            vec![self.config.database_name.as_str()]
+                .into_iter()
+                .chain(self.config.table_name.split('.')),
+        )
+        .map_err(|e| SinkError::Iceberg(anyhow!("Unable to parse table name: {e}")))?;
 
         let table = catalog
             .load_table(&table_id)
