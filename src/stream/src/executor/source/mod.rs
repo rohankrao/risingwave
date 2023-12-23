@@ -22,6 +22,7 @@ pub use state_table_handler::*;
 pub mod fetch_executor;
 pub use fetch_executor::*;
 
+pub mod kafka_backfill_executor;
 pub mod source_executor;
 
 pub mod list_executor;

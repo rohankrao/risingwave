@@ -347,6 +347,28 @@ impl<S: StateStore> SourceExecutor<S> {
         Ok(())
     }
 
+    fn handle_first_barrier(barrier: &Barrier, actor_id: ActorId, boot_state: &mut Vec<SplitImpl>) {
+        if let Some(mutation) = barrier.mutation.as_ref() {
+            match mutation.as_ref() {
+                Mutation::Add(AddMutation { splits, .. })
+                | Mutation::Update(UpdateMutation {
+                    actor_splits: splits,
+                    ..
+                }) => {
+                    if let Some(splits) = splits.get(&actor_id) {
+                        tracing::debug!(
+                            "source exector: actor {:?} boot with splits: {:?}",
+                            actor_id,
+                            splits
+                        );
+                        *boot_state = splits.clone();
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
     /// A source executor with a stream source receives:
     /// 1. Barrier messages
     /// 2. Data from external source
@@ -375,25 +397,7 @@ impl<S: StateStore> SourceExecutor<S> {
             .map_err(StreamExecutorError::connector_error)?;
 
         let mut boot_state = Vec::default();
-        if let Some(mutation) = barrier.mutation.as_ref() {
-            match mutation.as_ref() {
-                Mutation::Add(AddMutation { splits, .. })
-                | Mutation::Update(UpdateMutation {
-                    actor_splits: splits,
-                    ..
-                }) => {
-                    if let Some(splits) = splits.get(&self.actor_ctx.id) {
-                        tracing::debug!(
-                            "source exector: actor {:?} boot with splits: {:?}",
-                            self.actor_ctx.id,
-                            splits
-                        );
-                        boot_state = splits.clone();
-                    }
-                }
-                _ => {}
-            }
-        }
+        Self::handle_first_barrier(&barrier, self.actor_ctx.id, &mut boot_state);
         let mut latest_split_info = boot_state.clone();
 
         core.split_state_store.init_epoch(barrier.epoch);

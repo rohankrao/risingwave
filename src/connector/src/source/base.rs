@@ -354,6 +354,7 @@ pub type BoxTryStream<M> = BoxStream<'static, Result<M, RwError>>;
 #[derive(Clone, Debug, PartialEq)]
 pub struct StreamChunkWithState {
     pub chunk: StreamChunk,
+    /// The latest offsets for each split in this chunk.
     pub split_offset_mapping: Option<HashMap<SplitId, String>>,
 }
 

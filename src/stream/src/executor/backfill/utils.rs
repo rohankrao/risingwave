@@ -535,7 +535,7 @@ pub(crate) fn get_cdc_chunk_last_offset(
     table_reader: &ExternalTableReaderImpl,
     chunk: &StreamChunk,
 ) -> StreamExecutorResult<Option<CdcOffset>> {
-    let row = chunk.rows().last().unwrap().1;
+    let row = chunk.last_row();
     let offset_col = row.iter().last().unwrap();
     let output = offset_col
         .map(|scalar| Ok::<_, ConnectorError>(table_reader.parse_cdc_offset(scalar.into_utf8()))?);

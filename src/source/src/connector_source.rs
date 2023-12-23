@@ -112,6 +112,10 @@ impl ConnectorSource {
         }
     }
 
+    /// If `state` is `None`, returns a pending stream.
+    ///
+    /// If the connector supports multiple splits natively (currently only Kafka - see `TopicPartitionList`),
+    /// use the built-in support. Otherwise, `select_all` the streams from each split.
     pub async fn stream_reader(
         &self,
         state: ConnectorState,
