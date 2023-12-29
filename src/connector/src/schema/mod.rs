@@ -13,8 +13,11 @@
 // limitations under the License.
 
 pub mod avro;
+mod loader;
 pub mod protobuf;
 pub mod schema_registry;
+
+pub use loader::SchemaLoader;
 
 const MESSAGE_NAME_KEY: &str = "message";
 const KEY_MESSAGE_NAME_KEY: &str = "key.message";
@@ -24,3 +27,9 @@ const NAME_STRATEGY_KEY: &str = "schema.registry.name.strategy";
 
 #[derive(Debug)]
 pub struct SchemaFetchError(pub String);
+
+impl From<risingwave_common::error::RwError> for SchemaFetchError {
+    fn from(value: risingwave_common::error::RwError) -> Self {
+        Self(value.to_string())
+    }
+}
