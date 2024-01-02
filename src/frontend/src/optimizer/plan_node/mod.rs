@@ -676,8 +676,8 @@ impl dyn PlanNode {
 impl dyn PlanNode {
     /// Serialize the plan node and its children to a stream plan proto.
     ///
-    /// Note that [`StreamTableScan`] has its own implementation of `to_stream_prost`. We have a
-    /// hook inside to do some ad-hoc thing for [`StreamTableScan`].
+    /// Note that some operators has their own implementation of `to_stream_prost`. We have a
+    /// hook inside to do some ad-hoc things.
     pub fn to_stream_prost(&self, state: &mut BuildFragmentGraphState) -> StreamPlanPb {
         use stream::prelude::*;
 
@@ -686,6 +686,9 @@ impl dyn PlanNode {
         }
         if let Some(stream_cdc_table_scan) = self.as_stream_cdc_table_scan() {
             return stream_cdc_table_scan.adhoc_to_stream_prost(state);
+        }
+        if let Some(stream_source_backfill) = self.as_stream_source_backfill() {
+            return stream_source_backfill.adhoc_to_stream_prost(state);
         }
         if let Some(stream_share) = self.as_stream_share() {
             return stream_share.adhoc_to_stream_prost(state);
@@ -821,6 +824,7 @@ mod logical_project_set;
 mod logical_scan;
 mod logical_share;
 mod logical_source;
+mod logical_source_backfill;
 mod logical_sys_scan;
 mod logical_table_function;
 mod logical_topn;
@@ -850,6 +854,7 @@ mod stream_simple_agg;
 mod stream_sink;
 mod stream_sort;
 mod stream_source;
+mod stream_source_backfill;
 mod stream_stateless_simple_agg;
 mod stream_table_scan;
 mod stream_topn;
@@ -912,6 +917,7 @@ pub use logical_project_set::LogicalProjectSet;
 pub use logical_scan::LogicalScan;
 pub use logical_share::LogicalShare;
 pub use logical_source::LogicalSource;
+pub use logical_source_backfill::LogicalSourceBackfill;
 pub use logical_sys_scan::LogicalSysScan;
 pub use logical_table_function::LogicalTableFunction;
 pub use logical_topn::LogicalTopN;
@@ -943,6 +949,7 @@ pub use stream_simple_agg::StreamSimpleAgg;
 pub use stream_sink::StreamSink;
 pub use stream_sort::StreamEowcSort;
 pub use stream_source::StreamSource;
+pub use stream_source_backfill::StreamSourceBackfill;
 pub use stream_stateless_simple_agg::StreamStatelessSimpleAgg;
 pub use stream_table_scan::StreamTableScan;
 pub use stream_temporal_join::StreamTemporalJoin;
@@ -983,6 +990,7 @@ macro_rules! for_all_plan_nodes {
             , { Logical, CdcScan }
             , { Logical, SysScan }
             , { Logical, Source }
+            , { Logical, SourceBackfill }
             , { Logical, Insert }
             , { Logical, Delete }
             , { Logical, Update }
@@ -1036,6 +1044,7 @@ macro_rules! for_all_plan_nodes {
             , { Stream, CdcTableScan }
             , { Stream, Sink }
             , { Stream, Source }
+            , { Stream, SourceBackfill }
             , { Stream, HashJoin }
             , { Stream, Exchange }
             , { Stream, HashAgg }
@@ -1079,6 +1088,7 @@ macro_rules! for_logical_plan_nodes {
             , { Logical, CdcScan }
             , { Logical, SysScan }
             , { Logical, Source }
+            , { Logical, SourceBackfill }
             , { Logical, Insert }
             , { Logical, Delete }
             , { Logical, Update }
@@ -1152,6 +1162,7 @@ macro_rules! for_stream_plan_nodes {
             , { Stream, CdcTableScan }
             , { Stream, Sink }
             , { Stream, Source }
+            , { Stream, SourceBackfill }
             , { Stream, HashAgg }
             , { Stream, SimpleAgg }
             , { Stream, StatelessSimpleAgg }

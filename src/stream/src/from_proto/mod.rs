@@ -172,5 +172,7 @@ pub async fn create_executor(
         NodeBody::EowcOverWindow => EowcOverWindowExecutorBuilder,
         NodeBody::OverWindow => OverWindowExecutorBuilder,
         NodeBody::StreamFsFetch => FsFetchExecutorBuilder,
+        // TODO:
+        NodeBody::SourceBackfill => SourceExecutorBuilder,
     }
 }

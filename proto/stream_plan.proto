@@ -757,6 +757,7 @@ message StreamNode {
     StreamFsFetchNode stream_fs_fetch = 138;
     StreamCdcScanNode stream_cdc_scan = 139;
     CdcFilterNode cdc_filter = 140;
+    SourceNode source_backfill = 141;
   }
   // The id for the operator. This is local per mview.
   // TODO: should better be a uint32.

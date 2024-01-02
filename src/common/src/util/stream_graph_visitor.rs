@@ -187,6 +187,12 @@ pub fn visit_stream_node_tables_inner<F>(
                     always!(source.state_table, "FsFetch");
                 }
             }
+            NodeBody::SourceBackfill(node) => {
+                always!(
+                    node.source_inner.as_mut().unwrap().state_table,
+                    "SourceBackfill"
+                )
+            }
 
             // Sink
             NodeBody::Sink(node) => {

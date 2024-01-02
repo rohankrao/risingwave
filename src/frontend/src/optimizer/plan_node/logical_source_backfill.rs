@@ -45,15 +45,15 @@ use crate::optimizer::plan_node::stream_fs_fetch::StreamFsFetch;
 use crate::optimizer::plan_node::utils::column_names_pretty;
 use crate::optimizer::plan_node::{
     ColumnPruningContext, PredicatePushdownContext, RewriteStreamContext, StreamDedup,
-    ToStreamContext,
+    StreamSourceBackfill, ToStreamContext,
 };
 use crate::optimizer::property::Distribution::HashShard;
 use crate::optimizer::property::{Distribution, Order, RequiredDist};
 use crate::utils::{ColIndexMapping, Condition, IndexRewriter};
 
-/// `LogicalSource` returns contents of a table or other equivalent object
+/// `LogicalSourceBackfill` returns contents of a table or other equivalent object
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct LogicalSource {
+pub struct LogicalSourceBackfill {
     pub base: PlanBase<Logical>,
     pub core: generic::Source,
 
@@ -62,7 +62,7 @@ pub struct LogicalSource {
     output_exprs: Option<Vec<ExprImpl>>,
 }
 
-impl LogicalSource {
+impl LogicalSourceBackfill {
     pub fn new(
         source_catalog: Option<Rc<SourceCatalog>>,
         column_catalog: Vec<ColumnCatalog>,
@@ -86,7 +86,7 @@ impl LogicalSource {
 
         let output_exprs = Self::derive_output_exprs_from_generated_columns(&core.column_catalog)?;
 
-        Ok(LogicalSource {
+        Ok(LogicalSourceBackfill {
             base,
             core,
             output_exprs,
@@ -243,8 +243,11 @@ impl LogicalSource {
         })
     }
 
-    pub fn source_catalog(&self) -> Option<Rc<SourceCatalog>> {
-        self.core.catalog.clone()
+    pub fn source_catalog(&self) -> Rc<SourceCatalog> {
+        self.core
+            .catalog
+            .clone()
+            .expect("source catalog should exist for LogicalSourceBackfill")
     }
 
     fn clone_with_kafka_timestamp_range(&self, range: (Bound<i64>, Bound<i64>)) -> Self {
@@ -304,32 +307,29 @@ impl LogicalSource {
     }
 }
 
-impl_plan_tree_node_for_leaf! {LogicalSource}
-impl Distill for LogicalSource {
+impl_plan_tree_node_for_leaf! {LogicalSourceBackfill}
+impl Distill for LogicalSourceBackfill {
     fn distill<'a>(&self) -> XmlNode<'a> {
-        let fields = if let Some(catalog) = self.source_catalog() {
-            let src = Pretty::from(catalog.name.clone());
-            let time = Pretty::debug(&self.core.kafka_timestamp_range);
-            vec![
-                ("source", src),
-                ("columns", column_names_pretty(self.schema())),
-                ("time_range", time),
-            ]
-        } else {
-            vec![]
-        };
-        childless_record("LogicalSource", fields)
+        let src = Pretty::from(self.source_catalog().name.clone());
+        let time = Pretty::debug(&self.core.kafka_timestamp_range);
+        let fields = vec![
+            ("source", src),
+            ("columns", column_names_pretty(self.schema())),
+            ("time_range", time),
+        ];
+
+        childless_record("LogicalSourceBackfill", fields)
     }
 }
 
-impl ColPrunable for LogicalSource {
+impl ColPrunable for LogicalSourceBackfill {
     fn prune_col(&self, required_cols: &[usize], _ctx: &mut ColumnPruningContext) -> PlanRef {
         let mapping = ColIndexMapping::with_remaining_columns(required_cols, self.schema().len());
         LogicalProject::with_mapping(self.clone().into(), mapping).into()
     }
 }
 
-impl ExprRewritable for LogicalSource {
+impl ExprRewritable for LogicalSourceBackfill {
     fn has_rewritable_expr(&self) -> bool {
         self.output_exprs.is_some()
     }
@@ -349,7 +349,7 @@ impl ExprRewritable for LogicalSource {
     }
 }
 
-impl ExprVisitable for LogicalSource {
+impl ExprVisitable for LogicalSourceBackfill {
     fn visit_exprs(&self, v: &mut dyn ExprVisitor) {
         self.output_exprs
             .iter()
@@ -509,7 +509,7 @@ fn expr_to_kafka_timestamp_range(
     }
 }
 
-impl PredicatePushdown for LogicalSource {
+impl PredicatePushdown for LogicalSourceBackfill {
     fn predicate_pushdown(
         &self,
         predicate: Condition,
@@ -540,44 +540,20 @@ impl PredicatePushdown for LogicalSource {
     }
 }
 
-impl ToBatch for LogicalSource {
+impl ToBatch for LogicalSourceBackfill {
     fn to_batch(&self) -> Result<PlanRef> {
-        if self.core.catalog.is_some()
-            && ConnectorProperties::is_new_fs_connector_b_tree_map(
-                &self.core.catalog.as_ref().unwrap().with_properties,
-            )
-        {
-            bail_not_implemented!("New S3 connector for batch");
-        }
-        let source = self.wrap_with_optional_generated_columns_batch_proj()?;
-        Ok(source)
+        // TODO:
+        let source = BatchSource::new(self.core.clone());
+        Ok(source.into())
     }
 }
 
-impl ToStream for LogicalSource {
+impl ToStream for LogicalSourceBackfill {
     fn to_stream(&self, _ctx: &mut ToStreamContext) -> Result<PlanRef> {
-        let mut plan_prefix: Option<PlanRef> = None;
-        let mut plan: PlanRef;
-        if self.core.catalog.is_some()
-            && ConnectorProperties::is_new_fs_connector_b_tree_map(
-                &self.core.catalog.as_ref().unwrap().with_properties,
-            )
-        {
-            plan_prefix = Some(self.rewrite_new_s3_plan()?);
-        }
+        let mut plan = StreamSourceBackfill::new(self.rewrite_to_stream_batch_source()).into();
 
-        // TODO: after SourceBackfill is added, we shouldn't put generated columns/row id here, and put them after backfill instead.
-        plan = if self.core.for_table {
-            dispatch_new_s3_plan(self.rewrite_to_stream_batch_source(), plan_prefix)
-        } else {
-            // Create MV on source.
-            self.wrap_with_optional_generated_columns_stream_proj(plan_prefix)?
-        };
-
-        if let Some(catalog) = self.source_catalog()
-            && !catalog.watermark_descs.is_empty()
-            && !self.core.for_table
-        {
+        let catalog = self.source_catalog();
+        if !catalog.watermark_descs.is_empty() && !self.core.for_table {
             plan = StreamWatermarkFilter::new(plan, catalog.watermark_descs.clone()).into();
         }
 

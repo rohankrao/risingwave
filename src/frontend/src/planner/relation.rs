@@ -27,7 +27,8 @@ use crate::binder::{
 use crate::expr::{Expr, ExprImpl, ExprType, FunctionCall, InputRef};
 use crate::optimizer::plan_node::{
     LogicalApply, LogicalHopWindow, LogicalJoin, LogicalProject, LogicalScan, LogicalShare,
-    LogicalSource, LogicalSysScan, LogicalTableFunction, LogicalValues, PlanRef,
+    LogicalSource, LogicalSourceBackfill, LogicalSysScan, LogicalTableFunction, LogicalValues,
+    PlanRef,
 };
 use crate::optimizer::property::Cardinality;
 use crate::planner::Planner;
@@ -85,7 +86,14 @@ impl Planner {
     }
 
     pub(super) fn plan_source(&mut self, source: BoundSource) -> Result<PlanRef> {
-        Ok(LogicalSource::with_catalog(Rc::new(source.catalog), false, self.ctx())?.into())
+        if source.can_backfill() {
+            Ok(
+                LogicalSourceBackfill::with_catalog(Rc::new(source.catalog), false, self.ctx())?
+                    .into(),
+            )
+        } else {
+            Ok(LogicalSource::with_catalog(Rc::new(source.catalog), false, self.ctx())?.into())
+        }
     }
 
     pub(super) fn plan_join(&mut self, join: BoundJoin) -> Result<PlanRef> {

@@ -178,6 +178,17 @@ impl BuildingFragment {
                     cdc_filter.upstream_source_id.into(),
                     cdc_filter.upstream_column_ids.clone(),
                 ),
+                NodeBody::SourceBackfill(backfill) => (
+                    backfill.source_inner.as_ref().unwrap().source_id.into(),
+                    backfill
+                        .source_inner
+                        .as_ref()
+                        .unwrap()
+                        .columns
+                        .iter()
+                        .map(|c| c.column_desc.as_ref().unwrap().column_id)
+                        .collect(),
+                ),
                 _ => return,
             };
             table_columns
@@ -188,7 +199,7 @@ impl BuildingFragment {
         assert_eq!(
             table_columns.len(),
             fragment.upstream_table_ids.len(),
-            "fragment type: {}",
+            "fragment type: {:b}",
             fragment.fragment_type_mask
         );
 
@@ -484,7 +495,7 @@ pub(super) enum EitherFragment {
     /// An internal fragment that is being built for the current streaming job.
     Building(BuildingFragment),
 
-    /// An existing fragment that is external but connected to the fragments being built.
+    /// An existing fragment that is external but connected to the fragments being built.!!!!!!!!!!!!!
     Existing(Fragment),
 }
 

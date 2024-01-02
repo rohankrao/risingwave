@@ -126,6 +126,7 @@ impl ActorBuilder {
         self.rewrite_inner(&self.nodes, 0)
     }
 
+    /// 假的变成真的
     fn rewrite_inner(&self, stream_node: &StreamNode, depth: usize) -> MetaResult<StreamNode> {
         match stream_node.get_node_body()? {
             // Leaf node `Exchange`.
@@ -238,6 +239,47 @@ impl ActorBuilder {
                         ..merge_node.clone()
                     },
                 ];
+                Ok(StreamNode {
+                    input,
+                    ..stream_node.clone()
+                })
+            }
+
+            // "Leaf" node `StreamScan`.
+            NodeBody::SourceBackfill(source_backfill) => {
+                let input = stream_node.get_input();
+                assert_eq!(input.len(), 1);
+
+                let merge_node = &input[0];
+                assert_matches!(merge_node.node_body, Some(NodeBody::Merge(_)));
+
+                // Index the upstreams by the an external edge ID.
+                let upstreams = &self.upstreams[&EdgeId::UpstreamExternal {
+                    upstream_table_id: source_backfill
+                        .source_inner
+                        .as_ref()
+                        .unwrap()
+                        .source_id
+                        .into(),
+                    downstream_fragment_id: self.fragment_id,
+                }];
+
+                let upstream_actor_id = upstreams.actors.as_global_ids();
+                assert_eq!(upstream_actor_id.len(), 1);
+
+                let input = vec![
+                    // Fill the merge node body with correct upstream info.
+                    StreamNode {
+                        node_body: Some(NodeBody::Merge(MergeNode {
+                            upstream_actor_id,
+                            upstream_fragment_id: upstreams.fragment_id.as_global_id(),
+                            upstream_dispatcher_type: DispatcherType::NoShuffle as _,
+                            fields: merge_node.fields.clone(),
+                        })),
+                        ..merge_node.clone()
+                    },
+                ];
+
                 Ok(StreamNode {
                     input,
                     ..stream_node.clone()

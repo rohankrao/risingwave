@@ -153,7 +153,7 @@ enum TableJobType {
   // table streaming jobs excepts the `SHARED_CDC_SOURCE` type
   TABLE_JOB_TYPE_GENERAL = 1;
   // table streaming job sharing a CDC source job
-  TABLE_JOB_TYPE_SHARED_CDC_SOURCE = 2;
+  TABLE_JOB_TYPE_SOURCE = 2;
 }
 
 message CreateTableRequest {

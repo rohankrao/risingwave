@@ -485,6 +485,7 @@ impl DdlController {
             unimplemented!("support drop source in v2");
         };
         // 1. Drop source in catalog.
+        // If the source has a streaming job, it's also dropped here.
         let (version, streaming_job_ids) = mgr
             .catalog_manager
             .drop_relation(
