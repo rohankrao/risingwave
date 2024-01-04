@@ -25,12 +25,12 @@ use risingwave_common::array::stream_record::Record;
 use risingwave_common::array::{Op, RowRef, StreamChunk};
 use risingwave_common::row::{OwnedRow, Row, RowExt};
 use risingwave_common::session_config::OverWindowCachePolicy as CachePolicy;
-use risingwave_common::types::{DataType, DefaultOrdered};
+use risingwave_common::types::{DataType, DefaultOrdered, ScalarImpl};
 use risingwave_common::util::iter_util::ZipEqFast;
 use risingwave_common::util::memcmp_encoding::{self, MemcmpEncoded};
 use risingwave_common::util::sort_util::OrderType;
 use risingwave_expr::window_function::{
-    create_window_state, StateKey, WindowFuncCall, WindowStates,
+    create_window_state, RangeFrameBounds, RowsFrameBounds, StateKey, WindowFuncCall, WindowStates,
 };
 use risingwave_storage::StateStore;
 
@@ -189,12 +189,73 @@ impl<S: StateStore> OverWindowExecutor<S> {
             &input_info.pk_indices,
         );
 
+        // TODO(): just for test
+        let calls = args.calls.into_iter().map(|mut call| {
+            let test_frame_bounds = match call.frame.bounds.clone() {
+                risingwave_expr::window_function::FrameBounds::Rows(RowsFrameBounds {
+                    start,
+                    end,
+                }) => {
+                    let start = match start {
+                        risingwave_expr::window_function::FrameBound::UnboundedPreceding => {
+                            risingwave_expr::window_function::FrameBound::UnboundedPreceding
+                        }
+                        risingwave_expr::window_function::FrameBound::Preceding(offset) => {
+                            risingwave_expr::window_function::FrameBound::Preceding(
+                                ScalarImpl::from(offset as i32),
+                            )
+                        }
+                        risingwave_expr::window_function::FrameBound::CurrentRow => {
+                            risingwave_expr::window_function::FrameBound::CurrentRow
+                        }
+                        risingwave_expr::window_function::FrameBound::Following(offset) => {
+                            risingwave_expr::window_function::FrameBound::Following(
+                                ScalarImpl::from(offset as i32),
+                            )
+                        }
+                        risingwave_expr::window_function::FrameBound::UnboundedFollowing => {
+                            risingwave_expr::window_function::FrameBound::UnboundedFollowing
+                        }
+                    };
+                    let end = match end {
+                        risingwave_expr::window_function::FrameBound::UnboundedPreceding => {
+                            risingwave_expr::window_function::FrameBound::UnboundedPreceding
+                        }
+                        risingwave_expr::window_function::FrameBound::Preceding(offset) => {
+                            risingwave_expr::window_function::FrameBound::Preceding(
+                                ScalarImpl::from(offset as i32),
+                            )
+                        }
+                        risingwave_expr::window_function::FrameBound::CurrentRow => {
+                            risingwave_expr::window_function::FrameBound::CurrentRow
+                        }
+                        risingwave_expr::window_function::FrameBound::Following(offset) => {
+                            risingwave_expr::window_function::FrameBound::Following(
+                                ScalarImpl::from(offset as i32),
+                            )
+                        }
+                        risingwave_expr::window_function::FrameBound::UnboundedFollowing => {
+                            risingwave_expr::window_function::FrameBound::UnboundedFollowing
+                        }
+                    };
+                    risingwave_expr::window_function::FrameBounds::Range(RangeFrameBounds {
+                        start,
+                        end,
+                    })
+                }
+                bounds @ risingwave_expr::window_function::FrameBounds::Range(..) => bounds,
+            };
+            call.frame.bounds = test_frame_bounds;
+            println!("[rc] new frame: {}", call.frame);
+            call
+        });
+
         Self {
             input: args.input,
             inner: ExecutorInner {
                 actor_ctx: args.actor_ctx,
                 info: args.info,
-                calls: args.calls,
+                calls: calls.collect(),
                 partition_key_indices: args.partition_key_indices,
                 order_key_indices: args.order_key_indices,
                 order_key_data_types,

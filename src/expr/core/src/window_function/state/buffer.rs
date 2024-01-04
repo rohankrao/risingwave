@@ -85,6 +85,9 @@ impl<K: Ord, V: Clone> WindowBuffer<K, V> {
                         false // unbounded frame start, never preceding-saturated
                     }
                 }
+                FrameBounds::Range(..) => {
+                    todo!() // TODO(): make this only handle ROWS
+                }
             }
     }
 
@@ -109,6 +112,9 @@ impl<K: Ord, V: Clone> WindowBuffer<K, V> {
                     } else {
                         false // unbounded frame end, never following-saturated
                     }
+                }
+                FrameBounds::Range(..) => {
+                    todo!() // TODO(): make this only handle ROWS
                 }
             }
     }
@@ -203,6 +209,9 @@ impl<K: Ord, V: Clone> WindowBuffer<K, V> {
                     // unbounded end
                     self.right_excl_idx = self.buffer.len();
                 }
+            }
+            FrameBounds::Range(..) => {
+                todo!() // TODO(): make this only handle ROWS
             }
         }
     }

@@ -25,7 +25,9 @@ use super::{WindowFuncCall, WindowFuncKind};
 use crate::{ExprError, Result};
 
 mod aggregate;
+mod aggregate_range;
 mod buffer;
+mod buffer_range;
 mod range_utils;
 mod rank;
 
@@ -122,7 +124,16 @@ pub fn create_window_state(call: &WindowFuncCall) -> Result<Box<dyn WindowState 
         RowNumber => Box::new(rank::RankState::<rank::RowNumber>::new(call)),
         Rank => Box::new(rank::RankState::<rank::Rank>::new(call)),
         DenseRank => Box::new(rank::RankState::<rank::DenseRank>::new(call)),
-        Aggregate(_) => Box::new(aggregate::AggregateState::new(call)?),
+        Aggregate(_) => {
+            if call.frame.bounds.is_rows() {
+                Box::new(aggregate::AggregateState::new(&call)?)
+            } else if call.frame.bounds.is_range() {
+                // TODO(): unify RangeAggregateState and AggregateState
+                Box::new(aggregate_range::RangeAggregateState::new(&call)?)
+            } else {
+                unreachable!()
+            }
+        }
         kind => {
             return Err(ExprError::UnsupportedFunction(format!(
                 "{}({}) -> {}",

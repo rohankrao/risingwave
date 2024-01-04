@@ -25,7 +25,9 @@ use risingwave_common::array::stream_record::Record;
 use risingwave_common::estimate_size::collections::EstimatedBTreeMap;
 use risingwave_common::row::{OwnedRow, Row};
 use risingwave_common::session_config::OverWindowCachePolicy as CachePolicy;
-use risingwave_common::types::Sentinelled;
+use risingwave_common::types::{Datum, Sentinelled};
+use risingwave_common::util::memcmp_encoding;
+use risingwave_common::util::sort_util::cmp_datum;
 use risingwave_expr::window_function::{FrameBounds, StateKey, WindowFuncCall};
 use risingwave_storage::store::PrefetchOptions;
 use risingwave_storage::StateStore;
@@ -35,6 +37,17 @@ use crate::executor::test_utils::prelude::StateTable;
 use crate::executor::StreamExecutorResult;
 
 pub(super) type CacheKey = Sentinelled<StateKey>;
+
+// TODO()
+fn test_order_col() -> (
+    risingwave_common::types::DataType,
+    risingwave_common::util::sort_util::OrderType,
+) {
+    (
+        risingwave_common::types::DataType::Int32,
+        risingwave_common::util::sort_util::OrderType::ascending(),
+    )
+}
 
 /// Range cache for one over window partition.
 /// The cache entries can be:
@@ -395,6 +408,8 @@ impl<'a, S: StateStore> OverPartition<'a, S> {
                 let ranges =
                     self::find_affected_ranges(self.calls, DeltaBTreeMap::new(cache_inner, delta));
                 self.stats.lookup_count += 1;
+
+                println!("[rc] ranges: {:?}", ranges);
 
                 if ranges.is_empty() {
                     // no ranges affected, we're done
@@ -790,11 +805,6 @@ fn find_affected_ranges<'cache>(
     &'cache CacheKey,
     &'cache CacheKey,
 )> {
-    // XXX(rc): NOTE FOR DEVS
-    // Must carefully consider the sentinel keys in the cache when extending this function to
-    // support `RANGE` and `GROUPS` frames later. May introduce a return value variant to clearly
-    // tell the caller that there exists at least one affected range that touches the sentinel.
-
     if part_with_delta.first_key().is_none() {
         // all keys are deleted in the delta
         return vec![];
@@ -828,15 +838,21 @@ fn find_affected_ranges<'cache>(
     // `first_curr_key` which is the MINIMUM of all `first_curr_key`s of all frames of all window
     // function calls.
 
-    let first_curr_key = if end_is_unbounded || delta_first_key == first_key {
+    let (
+        first_curr_key,
+        // By *logical*, it means the order value doesn't necessary to exist in the `part_with_delta`, instead,
+        // it's just used as the base when calculating *first frame start* of `RANGE` frames later.
+        logical_first_curr_order,
+    ) = if end_is_unbounded || delta_first_key == first_key {
         // If the frame end is unbounded, or, the first key is in delta, then the frame corresponding
         // to the first key is always affected.
-        first_key
+        (first_key, None)
     } else {
         let mut min_first_curr_key = &Sentinelled::Largest;
+        let mut min_logical_first_curr_order: Option<Datum> = None;
 
         for call in calls {
-            let key = match &call.frame.bounds {
+            let (key, logical_order_value) = match &call.frame.bounds {
                 FrameBounds::Rows(bounds) => {
                     let mut cursor = part_with_delta.lower_bound(Bound::Included(delta_first_key));
                     for _ in 0..bounds.end.n_following_rows().unwrap() {
@@ -847,9 +863,83 @@ fn find_affected_ranges<'cache>(
                             break;
                         }
                     }
-                    cursor.key().unwrap_or(first_key)
+                    (
+                        cursor.key().unwrap_or(first_key),
+                        None, // `ROWS` frames don't have *logical* first curr order
+                    )
+                }
+                FrameBounds::Range(bounds) => {
+                    let (data_type, order_type) = test_order_col(); // TODO()
+
+                    let delta_first_order_value = memcmp_encoding::decode_value(
+                        &data_type,
+                        &delta_first_key.as_normal_expect().order_key,
+                        order_type,
+                    )
+                    .expect("no reason to fail here because we just encoded it in memory");
+
+                    let logical_curr_order_value =
+                        bounds.first_curr_of(&delta_first_order_value, order_type);
+
+                    match logical_curr_order_value {
+                        Sentinelled::Smallest => (first_key, None),
+                        Sentinelled::Normal(mut logical_curr_order_value) => {
+                            // In this case we can derive the logical order value of the first CURRENT ROW corresponding to the given
+                            // `delta_first_order_value`.
+
+                            logical_curr_order_value = std::cmp::min_by(
+                                logical_curr_order_value,
+                                delta_first_order_value,
+                                |x, y| cmp_datum(x, y, order_type),
+                            );
+
+                            // Now we try to search for the logical order value in `part_with_delta`.
+                            let order_value_enc = memcmp_encoding::encode_value(
+                                &logical_curr_order_value,
+                                order_type,
+                            )
+                            .expect("the data type is simple, should succeed");
+                            let search_key = Sentinelled::Normal(StateKey {
+                                order_key: order_value_enc,
+                                pk: OwnedRow::empty().into(), // empty row is minimal
+                            });
+
+                            let cursor = part_with_delta.lower_bound(Bound::Included(&search_key));
+                            let curr_key = if let Some((prev_key, _)) = cursor.peek_prev()
+                                && prev_key.is_smallest()
+                            {
+                                // If the found lower bound of search key is right behind a smallest sentinel,
+                                // we don't know if there's any other rows with the same order key in the state
+                                // table but not in cache. We should conservatively return the sentinel key as
+                                // the first curr key.
+                                prev_key
+                            } else {
+                                // If cursor is in ghost position, it simply means that the search key is larger than any existing keys.
+                                cursor.key().unwrap_or(last_key)
+                            };
+
+                            (curr_key, Some(logical_curr_order_value))
+                        }
+                        Sentinelled::Largest => {
+                            unreachable!("first curr key can never be the largest, which means UNBOUNDED FOLLOWING")
+                        }
+                    }
                 }
             };
+
+            if let Some(logical_order_value) = logical_order_value {
+                let (_data_type, order_type) = test_order_col(); // TODO()
+                if let Some(min_logical_first_curr_order) = min_logical_first_curr_order.as_mut() {
+                    *min_logical_first_curr_order = std::cmp::min_by(
+                        min_logical_first_curr_order.take(),
+                        logical_order_value,
+                        |x, y| cmp_datum(x, y, order_type),
+                    );
+                } else {
+                    min_logical_first_curr_order = Some(logical_order_value);
+                }
+            }
+
             min_first_curr_key = min_first_curr_key.min(key);
             if min_first_curr_key == first_key {
                 // if we already pushed the affected curr key to the first key, no more pushing is needed
@@ -857,7 +947,7 @@ fn find_affected_ranges<'cache>(
             }
         }
 
-        min_first_curr_key
+        (min_first_curr_key, min_logical_first_curr_order)
     };
 
     let first_frame_start = if start_is_unbounded || first_curr_key == first_key {
@@ -879,6 +969,59 @@ fn find_affected_ranges<'cache>(
                     }
                     cursor.key().unwrap_or(first_key)
                 }
+                FrameBounds::Range(bounds) => {
+                    let (_data_type, order_type) = test_order_col(); // TODO()
+
+                    let logical_curr_order_value = logical_first_curr_order
+                        .as_ref()
+                        .expect("otherwise should've gone `first_curr_key == first_key` branch")
+                        .clone();
+
+                    let logical_frame_start =
+                        bounds.frame_start_of(&logical_curr_order_value, order_type);
+
+                    match logical_frame_start {
+                        Sentinelled::Smallest => first_key,
+                        Sentinelled::Normal(mut logical_frame_start) => {
+                            // In this case we can derive the logical order value of the frame start corresponding to the order
+                            // value of the *logical* CURRENT ROW.
+
+                            logical_frame_start = std::cmp::min_by(
+                                logical_frame_start,
+                                logical_curr_order_value,
+                                |x, y| cmp_datum(x, y, order_type),
+                            );
+
+                            // Now we try to search for the logical order value in `part_with_delta`.
+                            let order_value_enc =
+                                memcmp_encoding::encode_value(&logical_frame_start, order_type)
+                                    .expect("the data type is simple, should succeed");
+                            let search_key = Sentinelled::Normal(StateKey {
+                                order_key: order_value_enc,
+                                pk: OwnedRow::empty().into(), // empty row is minimal
+                            });
+
+                            let cursor = part_with_delta.lower_bound(Bound::Included(&search_key));
+                            let frame_start = if let Some((prev_key, _)) = cursor.peek_prev()
+                                && prev_key.is_smallest()
+                            {
+                                // If the found lower bound of search key is right behind a smallest sentinel,
+                                // we don't know if there's any other rows with the same order key in the state
+                                // table but not in cache. We should conservatively return the sentinel key as
+                                // the first curr key.
+                                prev_key
+                            } else {
+                                // If cursor is in ghost position, it simply means that the search key is larger than any existing keys.
+                                cursor.key().unwrap_or(last_key)
+                            };
+
+                            frame_start
+                        }
+                        Sentinelled::Largest => {
+                            unreachable!("first frame start can never be the largest, which means UNBOUNDED FOLLOWING")
+                        }
+                    }
+                }
             };
             min_frame_start = min_frame_start.min(key);
             if min_frame_start == first_key {
@@ -890,13 +1033,18 @@ fn find_affected_ranges<'cache>(
         min_frame_start
     };
 
-    let last_curr_key = if start_is_unbounded || delta_last_key == last_key {
-        last_key
+    let (
+        last_curr_key,
+        // similar to `logical_first_curr_order`
+        logical_last_curr_order,
+    ) = if start_is_unbounded || delta_last_key == last_key {
+        (last_key, None)
     } else {
         let mut max_last_curr_key = &Sentinelled::Smallest;
+        let mut max_logical_last_curr_order: Option<Datum> = None;
 
         for call in calls {
-            let key = match &call.frame.bounds {
+            let (key, logical_order_value) = match &call.frame.bounds {
                 FrameBounds::Rows(bounds) => {
                     let mut cursor = part_with_delta.upper_bound(Bound::Included(delta_last_key));
                     for _ in 0..bounds.start.n_preceding_rows().unwrap() {
@@ -905,9 +1053,87 @@ fn find_affected_ranges<'cache>(
                             break;
                         }
                     }
-                    cursor.key().unwrap_or(last_key)
+                    (
+                        cursor.key().unwrap_or(last_key),
+                        None, // `ROWS` frames don't have *logical* last curr order
+                    )
+                }
+                FrameBounds::Range(bounds) => {
+                    let (data_type, order_type) = test_order_col(); // TODO()
+
+                    let delta_last_order_value = memcmp_encoding::decode_value(
+                        &data_type,
+                        &delta_last_key.as_normal_expect().order_key,
+                        order_type,
+                    )
+                    .expect("no reason to fail here because we just encoded it in memory");
+
+                    let logical_curr_order_value =
+                        bounds.last_curr_of(&delta_last_order_value, order_type);
+
+                    match logical_curr_order_value {
+                        Sentinelled::Largest => (last_key, None),
+                        Sentinelled::Normal(mut logical_curr_order_value) => {
+                            // In this case we can derive the logical order value of the last CURRENT ROW corresponding to the given
+                            // `delta_last_order_value`.
+
+                            logical_curr_order_value = std::cmp::max_by(
+                                logical_curr_order_value,
+                                delta_last_order_value,
+                                |x, y| cmp_datum(x, y, order_type),
+                            );
+
+                            // Now we try to search for the logical order value in `part_with_delta`.
+                            let order_value_enc = memcmp_encoding::encode_value(
+                                &logical_curr_order_value,
+                                order_type,
+                            )
+                            .expect("the data type is simple, should succeed");
+                            let search_key = Sentinelled::Normal(StateKey {
+                                order_key: order_value_enc,
+                                pk: OwnedRow::new(vec![
+                                        None; // all-NULL row is maximal
+                                        delta_last_key.as_normal_expect().pk.len()
+                                    ])
+                                .into(),
+                            });
+
+                            let cursor = part_with_delta.upper_bound(Bound::Included(&search_key));
+                            let curr_key = if let Some((next_key, _)) = cursor.peek_next()
+                                && next_key.is_largest()
+                            {
+                                // If the found upper bound of search key is right before a largest sentinel,
+                                // we don't know if there's any other rows with the same order key in the state
+                                // table but not in cache. We should conservatively return the sentinel key as
+                                // the last curr key.
+                                next_key
+                            } else {
+                                // If cursor is in ghost position, it simply means that the search key is larger than any existing keys.
+                                cursor.key().unwrap_or(first_key)
+                            };
+
+                            (curr_key, Some(logical_curr_order_value))
+                        }
+                        Sentinelled::Smallest => {
+                            unreachable!("last curr key can never be the smallest, which means UNBOUNDED PRECEDING")
+                        }
+                    }
                 }
             };
+
+            if let Some(logical_order_value) = logical_order_value {
+                let (_data_type, order_type) = test_order_col(); // TODO()
+                if let Some(max_logical_last_curr_order) = max_logical_last_curr_order.as_mut() {
+                    *max_logical_last_curr_order = std::cmp::max_by(
+                        max_logical_last_curr_order.take(),
+                        logical_order_value,
+                        |x, y| cmp_datum(x, y, order_type),
+                    );
+                } else {
+                    max_logical_last_curr_order = Some(logical_order_value);
+                }
+            }
+
             max_last_curr_key = max_last_curr_key.max(key);
             if max_last_curr_key == last_key {
                 // if we already pushed the affected curr key to the last key, no more pushing is needed
@@ -915,7 +1141,7 @@ fn find_affected_ranges<'cache>(
             }
         }
 
-        max_last_curr_key
+        (max_last_curr_key, max_logical_last_curr_order)
     };
 
     let last_frame_end = if end_is_unbounded || last_curr_key == last_key {
@@ -934,6 +1160,63 @@ fn find_affected_ranges<'cache>(
                         }
                     }
                     cursor.key().unwrap_or(last_key)
+                }
+                FrameBounds::Range(bounds) => {
+                    let (_data_type, order_type) = test_order_col(); // TODO()
+
+                    let logical_curr_order_value = logical_last_curr_order
+                        .as_ref()
+                        .expect("otherwise should've gone `last_curr_key == last_key` branch")
+                        .clone();
+
+                    let logical_frame_end =
+                        bounds.frame_end_of(&logical_curr_order_value, order_type);
+
+                    match logical_frame_end {
+                        Sentinelled::Largest => last_key,
+                        Sentinelled::Normal(mut logical_frame_end) => {
+                            // In this case we can derive the logical order value of the frame end corresponding to the order
+                            // value of the *logical* CURRENT ROW.
+
+                            logical_frame_end = std::cmp::max_by(
+                                logical_frame_end,
+                                logical_curr_order_value,
+                                |x, y| cmp_datum(x, y, order_type),
+                            );
+
+                            // Now we try to search for the logical order value in `part_with_delta`.
+                            let order_value_enc =
+                                memcmp_encoding::encode_value(&logical_frame_end, order_type)
+                                    .expect("the data type is simple, should succeed");
+                            let search_key = Sentinelled::Normal(StateKey {
+                                order_key: order_value_enc,
+                                pk: OwnedRow::new(vec![
+                                    None; // all-NULL row is maximal
+                                    delta_last_key.as_normal_expect().pk.len()
+                                ])
+                                .into(),
+                            });
+
+                            let cursor = part_with_delta.upper_bound(Bound::Included(&search_key));
+                            let frame_end = if let Some((next_key, _)) = cursor.peek_next()
+                                && next_key.is_largest()
+                            {
+                                // If the found upper bound of search key is right before a largest sentinel,
+                                // we don't know if there's any other rows with the same order key in the state
+                                // table but not in cache. We should conservatively return the sentinel key as
+                                // the first curr key.
+                                next_key
+                            } else {
+                                // If cursor is in ghost position, it simply means that the search key is larger than any existing keys.
+                                cursor.key().unwrap_or(first_key)
+                            };
+
+                            frame_end
+                        }
+                        Sentinelled::Smallest => {
+                            unreachable!("last frame end can never be the smallest, which means UNBOUNDED PRECEDING")
+                        }
+                    }
                 }
             };
             max_frame_end = max_frame_end.max(key);
