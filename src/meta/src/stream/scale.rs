@@ -49,10 +49,7 @@ use tokio::time::MissedTickBehavior;
 use uuid::Uuid;
 
 use crate::barrier::{Command, Reschedule};
-use crate::manager::{
-    ClusterManagerRef, FragmentManagerRef, IdCategory, LocalNotification, MetaSrvEnv,
-    MetadataManager, WorkerId,
-};
+use crate::manager::{IdCategory, LocalNotification, MetaSrvEnv, MetadataManager, WorkerId};
 use crate::model::{ActorId, DispatcherId, FragmentId, TableFragments, TableParallelism};
 use crate::serving::{
     to_deleted_fragment_parallel_unit_mapping, to_fragment_parallel_unit_mapping,
@@ -60,7 +57,7 @@ use crate::serving::{
 };
 use crate::storage::{MetaStore, MetaStoreError, MetaStoreRef, Transaction, DEFAULT_COLUMN_FAMILY};
 use crate::stream::{GlobalStreamManager, SourceManagerRef};
-use crate::{MetaError, MetaResult};
+use crate::{model, MetaError, MetaResult};
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub struct TableRevision(u64);
@@ -368,9 +365,7 @@ pub struct RescheduleOptions {
 pub type ScaleControllerRef = Arc<ScaleController>;
 
 pub struct ScaleController {
-    pub(super) fragment_manager: FragmentManagerRef,
-
-    pub cluster_manager: ClusterManagerRef,
+    pub metadata_manager: MetadataManager,
 
     pub source_manager: SourceManagerRef,
 
@@ -383,14 +378,10 @@ impl ScaleController {
         source_manager: SourceManagerRef,
         env: MetaSrvEnv,
     ) -> Self {
-        match metadata_manager {
-            MetadataManager::V1(mgr) => Self {
-                fragment_manager: mgr.fragment_manager.clone(),
-                cluster_manager: mgr.cluster_manager.clone(),
-                source_manager,
-                env,
-            },
-            MetadataManager::V2(_) => unimplemented!("support v2 in scale controller"),
+        Self {
+            metadata_manager: metadata_manager.clone(),
+            source_manager,
+            env,
         }
     }
 
@@ -401,11 +392,10 @@ impl ScaleController {
         options: RescheduleOptions,
         table_parallelisms: Option<&mut HashMap<TableId, TableParallelism>>,
     ) -> MetaResult<RescheduleContext> {
-        // Index worker node, used to create actor
         let worker_nodes: HashMap<WorkerId, WorkerNode> = self
-            .cluster_manager
+            .metadata_manager
             .list_active_streaming_compute_nodes()
-            .await
+            .await?
             .into_iter()
             .map(|worker_node| (worker_node.id, worker_node))
             .collect();
@@ -463,7 +453,10 @@ impl ScaleController {
         let mut actor_status = BTreeMap::new();
         let mut fragment_state = HashMap::new();
         let mut fragment_to_table = HashMap::new();
-        for table_fragments in self.fragment_manager.list_table_fragments().await {
+
+        let all_table_fragments = self.list_all_table_fragments().await?;
+
+        for table_fragments in all_table_fragments {
             fragment_state.extend(
                 table_fragments
                     .fragment_ids()
@@ -1308,7 +1301,7 @@ impl ScaleController {
         }
 
         let applied_reschedules = self
-            .fragment_manager
+            .metadata_manager
             .pre_apply_reschedules(fragment_created_actors)
             .await;
 
@@ -1538,13 +1531,10 @@ impl ScaleController {
         table_parallelism: &HashMap<TableId, TableParallelism>,
     ) -> MetaResult<HashMap<WorkerId, Vec<ActorId>>> {
         let mut node_dropped_actors = HashMap::new();
-        for table_fragments in self
-            .fragment_manager
-            .get_fragment_read_guard()
-            .await
-            .table_fragments()
-            .values()
-        {
+
+        let all_table_fragments = self.list_all_table_fragments().await?;
+
+        for table_fragments in all_table_fragments {
             for fragment_id in table_fragments.fragments.keys() {
                 if let Some(reschedule) = reschedules.get(fragment_id) {
                     for actor_id in &reschedule.removed_actors {
@@ -1566,20 +1556,20 @@ impl ScaleController {
         }
 
         // Update fragment info after rescheduling in meta store.
-        self.fragment_manager
+        self.metadata_manager
             .post_apply_reschedules(reschedules.clone(), table_parallelism.clone())
             .await?;
 
         // Update serving fragment info after rescheduling in meta store.
         if !reschedules.is_empty() {
             let workers = self
-                .cluster_manager
-                .list_active_serving_compute_nodes()
-                .await;
+                .metadata_manager
+                .list_active_streaming_compute_nodes()
+                .await?;
             let streaming_parallelisms = self
-                .fragment_manager
+                .metadata_manager
                 .running_fragment_parallelisms(Some(reschedules.keys().cloned().collect()))
-                .await;
+                .await?;
             let serving_vnode_mapping = Arc::new(ServingVnodeMapping::default());
             let (upserted, failed) = serving_vnode_mapping.upsert(streaming_parallelisms, &workers);
             if !upserted.is_empty() {
@@ -1636,6 +1626,23 @@ impl ScaleController {
         Ok(node_dropped_actors)
     }
 
+    // FIXME: should be removed
+    async fn list_all_table_fragments(&self) -> MetaResult<Vec<model::TableFragments>> {
+        use crate::model::MetadataModel;
+        let all_table_fragments = match &self.metadata_manager {
+            MetadataManager::V1(mgr) => mgr.fragment_manager.list_table_fragments().await,
+            MetadataManager::V2(mgr) => mgr
+                .catalog_controller
+                .table_fragments()
+                .await?
+                .into_values()
+                .map(model::TableFragments::from_protobuf)
+                .collect(),
+        };
+
+        Ok(all_table_fragments)
+    }
+
     pub async fn generate_table_resize_plan(
         &self,
         policy: TableResizePolicy,
@@ -1646,9 +1653,9 @@ impl ScaleController {
         } = policy;
 
         let workers = self
-            .cluster_manager
+            .metadata_manager
             .list_active_streaming_compute_nodes()
-            .await;
+            .await?;
 
         let unschedulable_worker_ids = Self::filter_unschedulable_workers(&workers);
 
@@ -1677,7 +1684,7 @@ impl ScaleController {
             })
             .collect::<BTreeMap<_, _>>();
 
-        let all_table_fragments = self.fragment_manager.list_table_fragments().await;
+        let all_table_fragments = self.list_all_table_fragments().await?;
 
         // FIXME: only need actor id and dispatcher info, avoid clone it.
         let mut actor_map = HashMap::new();
@@ -1842,9 +1849,9 @@ impl ScaleController {
         let mut target_plan = HashMap::with_capacity(fragment_worker_changes.len());
 
         let workers = self
-            .cluster_manager
+            .metadata_manager
             .list_active_streaming_compute_nodes()
-            .await;
+            .await?;
 
         let unschedulable_worker_ids = Self::filter_unschedulable_workers(&workers);
 
@@ -1870,7 +1877,7 @@ impl ScaleController {
             })
             .collect::<HashMap<_, _>>();
 
-        let all_table_fragments = self.fragment_manager.list_table_fragments().await;
+        let all_table_fragments = self.list_all_table_fragments().await?;
 
         // FIXME: only need actor id and dispatcher info, avoid clone it.
         let mut actor_map = HashMap::new();
@@ -2436,59 +2443,62 @@ impl GlobalStreamManager {
     async fn trigger_parallelism_control(&self) -> MetaResult<()> {
         let _reschedule_job_lock = self.reschedule_lock.write().await;
 
-        let MetadataManager::V1(mgr) = &self.metadata_manager else {
-            unimplemented!("support reschedule in v2");
-        };
+        match &self.metadata_manager {
+            MetadataManager::V1(mgr) => {
+                let table_parallelisms = {
+                    let guard = mgr.fragment_manager.get_fragment_read_guard().await;
 
-        let table_parallelisms = {
-            let guard = mgr.fragment_manager.get_fragment_read_guard().await;
+                    guard
+                        .table_fragments()
+                        .iter()
+                        .map(|(table_id, table)| (table_id.table_id, table.assigned_parallelism))
+                        .collect()
+                };
 
-            guard
-                .table_fragments()
-                .iter()
-                .map(|(table_id, table)| (table_id.table_id, table.assigned_parallelism))
-                .collect()
-        };
+                let workers = mgr
+                    .cluster_manager
+                    .list_active_streaming_compute_nodes()
+                    .await;
 
-        let workers = mgr
-            .cluster_manager
-            .list_active_streaming_compute_nodes()
-            .await;
+                let schedulable_worker_ids = workers
+                    .iter()
+                    .filter(|worker| {
+                        !worker
+                            .property
+                            .as_ref()
+                            .map(|p| p.is_unschedulable)
+                            .unwrap_or(false)
+                    })
+                    .map(|worker| worker.id)
+                    .collect();
 
-        let schedulable_worker_ids = workers
-            .iter()
-            .filter(|worker| {
-                !worker
-                    .property
+                let reschedules = self
+                    .scale_controller
                     .as_ref()
-                    .map(|p| p.is_unschedulable)
-                    .unwrap_or(false)
-            })
-            .map(|worker| worker.id)
-            .collect();
+                    .unwrap()
+                    .generate_table_resize_plan(TableResizePolicy {
+                        worker_ids: schedulable_worker_ids,
+                        table_parallelisms,
+                    })
+                    .await?;
 
-        let reschedules = self
-            .scale_controller
-            .as_ref()
-            .unwrap()
-            .generate_table_resize_plan(TableResizePolicy {
-                worker_ids: schedulable_worker_ids,
-                table_parallelisms,
-            })
-            .await?;
+                if reschedules.is_empty() {
+                    return Ok(());
+                }
 
-        if reschedules.is_empty() {
-            return Ok(());
+                self.reschedule_actors(
+                    reschedules,
+                    RescheduleOptions {
+                        resolve_no_shuffle_upstream: true,
+                    },
+                    None,
+                )
+                .await?;
+            }
+            MetadataManager::V2(_mgr) => {
+                todo!()
+            }
         }
-
-        self.reschedule_actors(
-            reschedules,
-            RescheduleOptions {
-                resolve_no_shuffle_upstream: true,
-            },
-            None,
-        )
-        .await?;
 
         Ok(())
     }

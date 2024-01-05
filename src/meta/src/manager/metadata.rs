@@ -20,15 +20,16 @@ use risingwave_pb::common::worker_node::{PbResource, State};
 use risingwave_pb::common::{HostAddress, PbWorkerNode, PbWorkerType, WorkerType};
 use risingwave_pb::ddl_service::TableJobType;
 use risingwave_pb::meta::add_worker_node_request::Property as AddNodeProperty;
-use risingwave_pb::meta::table_fragments::Fragment;
-use risingwave_pb::stream_plan::PbStreamActor;
+use risingwave_pb::meta::table_fragments::{ActorStatus, Fragment};
+use risingwave_pb::stream_plan::{PbStreamActor, StreamActor};
 
+use crate::barrier::Reschedule;
 use crate::controller::catalog::CatalogControllerRef;
 use crate::controller::cluster::{ClusterControllerRef, WorkerExtraInfo};
 use crate::manager::{
     CatalogManagerRef, ClusterManagerRef, FragmentManagerRef, StreamingClusterInfo, WorkerId,
 };
-use crate::model::{ActorId, FragmentId, MetadataModel, TableFragments};
+use crate::model::{ActorId, FragmentId, MetadataModel, TableFragments, TableParallelism};
 use crate::MetaResult;
 
 #[derive(Clone)]
@@ -171,6 +172,60 @@ impl MetadataManager {
         match self {
             MetadataManager::V1(mgr) => Ok(mgr.catalog_manager.list_sources().await),
             MetadataManager::V2(mgr) => mgr.catalog_controller.list_sources().await,
+        }
+    }
+
+    pub async fn pre_apply_reschedules(
+        &self,
+        created_actors: HashMap<FragmentId, HashMap<ActorId, (StreamActor, ActorStatus)>>,
+    ) -> HashMap<FragmentId, HashSet<ActorId>> {
+        match self {
+            MetadataManager::V1(mgr) => {
+                mgr.fragment_manager
+                    .pre_apply_reschedules(created_actors)
+                    .await
+            }
+            MetadataManager::V2(_) => todo!(),
+        }
+    }
+
+    pub async fn post_apply_reschedules(
+        &self,
+        reschedules: HashMap<FragmentId, Reschedule>,
+        table_parallelism_assignment: HashMap<TableId, TableParallelism>,
+    ) -> MetaResult<()> {
+        match self {
+            MetadataManager::V1(mgr) => {
+                mgr.fragment_manager
+                    .post_apply_reschedules(reschedules, table_parallelism_assignment)
+                    .await
+            }
+            MetadataManager::V2(_) => todo!(),
+        }
+    }
+
+    pub async fn running_fragment_parallelisms(
+        &self,
+        id_filter: Option<HashSet<FragmentId>>,
+    ) -> MetaResult<HashMap<FragmentId, usize>> {
+        match self {
+            MetadataManager::V1(mgr) => Ok(mgr
+                .fragment_manager
+                .running_fragment_parallelisms(id_filter)
+                .await
+                .into_iter()
+                .map(|(k, v)| (k as FragmentId, v))
+                .collect()),
+            MetadataManager::V2(mgr) => {
+                let id_filter = id_filter.map(|ids| ids.into_iter().map(|id| id as _).collect());
+
+                let map = mgr
+                    .catalog_controller
+                    .running_fragment_parallelisms(id_filter)
+                    .await?;
+
+                Ok(map.into_iter().map(|(k, v)| (k as FragmentId, v)).collect())
+            }
         }
     }
 
