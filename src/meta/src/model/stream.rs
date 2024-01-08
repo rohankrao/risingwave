@@ -23,7 +23,7 @@ use risingwave_pb::common::{ParallelUnit, ParallelUnitMapping};
 use risingwave_pb::meta::table_fragments::actor_status::ActorState;
 use risingwave_pb::meta::table_fragments::{ActorStatus, Fragment, State};
 use risingwave_pb::meta::table_parallelism::{
-    FixedParallelism, Parallelism, PbAutoParallelism, PbCustomParallelism, PbFixedParallelism,
+    FixedParallelism, Parallelism, PbAdaptiveParallelism, PbCustomParallelism, PbFixedParallelism,
     PbParallelism,
 };
 use risingwave_pb::meta::{PbTableFragments, PbTableParallelism};
@@ -43,7 +43,7 @@ const TABLE_FRAGMENTS_CF_NAME: &str = "cf/table_fragments";
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum TableParallelism {
-    Auto,
+    Adaptive,
     Fixed(usize),
     Custom,
 }
@@ -53,9 +53,9 @@ impl From<PbTableParallelism> for TableParallelism {
         use Parallelism::*;
         match &value.parallelism {
             Some(Fixed(FixedParallelism { parallelism: n })) => Self::Fixed(*n as usize),
-            Some(Auto(_)) => Self::Auto,
+            Some(Adaptive(_)) => Self::Adaptive,
             Some(Custom(_)) => Self::Custom,
-            _ => Self::Auto,
+            _ => Self::Custom,
         }
     }
 }
@@ -65,7 +65,7 @@ impl From<TableParallelism> for PbTableParallelism {
         use TableParallelism::*;
 
         let parallelism = match value {
-            Auto => PbParallelism::Auto(PbAutoParallelism {}),
+            Adaptive => PbParallelism::Adaptive(PbAdaptiveParallelism {}),
             Fixed(n) => PbParallelism::Fixed(PbFixedParallelism {
                 parallelism: n as u32,
             }),
@@ -188,7 +188,7 @@ impl TableFragments {
             fragments,
             &BTreeMap::new(),
             StreamContext::default(),
-            TableParallelism::Auto,
+            TableParallelism::Adaptive,
         )
     }
 

@@ -1315,7 +1315,7 @@ impl DdlController {
         // actors on the compute nodes.
 
         let table_parallelism = match default_parallelism {
-            None => TableParallelism::Auto,
+            None => TableParallelism::Adaptive,
             Some(parallelism) => TableParallelism::Fixed(parallelism.get()),
         };
 
@@ -1740,7 +1740,7 @@ impl DdlController {
             .await? as u32;
 
         let table_parallelism = match default_parallelism {
-            None => TableParallelism::Auto,
+            None => TableParallelism::Adaptive,
             Some(parallelism) => TableParallelism::Fixed(parallelism.get()),
         };
 
