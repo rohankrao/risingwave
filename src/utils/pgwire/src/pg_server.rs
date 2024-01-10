@@ -109,6 +109,8 @@ pub trait Session: Send + Sync {
 
     fn set_config(&self, key: &str, value: String) -> Result<(), BoxedError>;
 
+    fn get_config(&self, key: &str) -> Result<String, BoxedError>;
+
     fn transaction_status(&self) -> TransactionStatus;
 
     fn init_exec_context(&self, sql: Arc<str>) -> ExecContextGuard;
@@ -348,6 +350,10 @@ mod tests {
 
         fn set_config(&self, _key: &str, _value: String) -> Result<(), BoxedError> {
             Ok(())
+        }
+
+        fn get_config(&self, key: &str) -> Result<String, BoxedError> {
+            Ok("".to_string())
         }
 
         fn take_notices(self: Arc<Self>) -> Vec<String> {

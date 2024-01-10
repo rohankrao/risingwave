@@ -615,6 +615,10 @@ impl SessionImpl {
             .map_err(Into::into)
     }
 
+    pub fn get_config(&self, key: &str) -> Result<String> {
+        self.config_map.read().get(key).map_err(Into::into)
+    }
+
     pub fn set_config_report(
         &self,
         key: &str,
@@ -1107,6 +1111,10 @@ impl Session for SessionImpl {
 
     fn set_config(&self, key: &str, value: String) -> std::result::Result<(), BoxedError> {
         Self::set_config(self, key, value).map_err(Into::into)
+    }
+
+    fn get_config(&self, key: &str) -> std::prelude::v1::Result<String, BoxedError> {
+        Self::get_config(&self, key).map_err(Into::into)
     }
 
     fn take_notices(self: Arc<Self>) -> Vec<String> {
