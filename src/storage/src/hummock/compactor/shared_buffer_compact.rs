@@ -402,8 +402,11 @@ pub async fn merge_imms_in_memory(
     let mut versions: Vec<(EpochWithGap, HummockValue<Bytes>)> = Vec::new();
 
     let mut pivot_last_delete_epoch = HummockEpoch::MAX;
+    // The last seen EpochWithGap for the same user key. It resets every time a new user key is seen.
+    // It is only used to sanity check whether we have two user keys with the same epoch.
+    let mut last_seen_user_key_epoch_with_gap = None;
 
-    for ((key, value), epoch) in items {
+    for ((key, value), epoch_with_gap) in items {
         assert!(key >= pivot, "key should be in ascending order");
         if key != pivot {
             merged_payload.push((pivot, versions));
@@ -420,14 +423,18 @@ pub async fn merge_imms_in_memory(
                     new_epoch: del_iter.earliest_epoch(),
                 });
             }
+        } else if let Some(last_seen_epoch_with_gap) = last_seen_user_key_epoch_with_gap {
+            // epoch_with_gap for the same user key should be monotonically decreasing during iteration
+            assert!(last_seen_epoch_with_gap > epoch_with_gap);
         }
+        last_seen_user_key_epoch_with_gap = Some(epoch_with_gap);
         let earliest_range_delete_which_can_see_key =
-            del_iter.earliest_delete_since(epoch.pure_epoch());
+            del_iter.earliest_delete_since(epoch_with_gap.pure_epoch());
         if value.is_delete() {
-            pivot_last_delete_epoch = epoch.pure_epoch();
+            pivot_last_delete_epoch = epoch_with_gap.pure_epoch();
         } else if earliest_range_delete_which_can_see_key < pivot_last_delete_epoch {
             debug_assert!(
-                epoch.pure_epoch() < earliest_range_delete_which_can_see_key
+                epoch_with_gap.pure_epoch() < earliest_range_delete_which_can_see_key
                     && earliest_range_delete_which_can_see_key < pivot_last_delete_epoch
             );
             pivot_last_delete_epoch = earliest_range_delete_which_can_see_key;
@@ -441,7 +448,7 @@ pub async fn merge_imms_in_memory(
                 HummockValue::Delete,
             ));
         }
-        versions.push((epoch, value));
+        versions.push((epoch_with_gap, value));
     }
     while del_iter.is_valid() {
         let event_key = del_iter.key().to_vec();

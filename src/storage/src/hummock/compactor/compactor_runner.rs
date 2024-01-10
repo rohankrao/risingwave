@@ -742,6 +742,9 @@ where
     let mut compaction_statistics = CompactionStatistics::default();
     let mut progress_key_num: u64 = 0;
     const PROGRESS_KEY_INTERVAL: u64 = 100;
+    // The last seen EpochWithGap for the same user key. It resets every time a new user key is seen.
+    // It is only used to sanity check whether we have two user keys with the same epoch.
+    let mut last_seen_user_key_epoch_with_gap = None;
     while iter.is_valid() {
         progress_key_num += 1;
 
@@ -773,8 +776,13 @@ where
                 local_stats.skip_delete_key_count += 1;
             }
         } else {
+            if let Some(last_seen_epoch_with_gap) = last_seen_user_key_epoch_with_gap {
+                // epoch_with_gap for the same user key should be monotonically decreasing during iteration
+                assert!(last_seen_epoch_with_gap > iter_key.epoch_with_gap);
+            }
             local_stats.skip_multi_version_key_count += 1;
         }
+        last_seen_user_key_epoch_with_gap = Some(iter_key.epoch_with_gap);
 
         if last_table_id.map_or(true, |last_table_id| {
             last_table_id != last_key.user_key.table_id.table_id

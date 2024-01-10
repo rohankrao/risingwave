@@ -55,6 +55,10 @@ pub struct UserIterator<I: HummockIterator<Direction = Forward>> {
     stats: StoreLocalStatistic,
 
     delete_range_iter: ForwardMergeRangeIterator,
+
+    // The last seen EpochWithGap for the same user key. It resets every time a new user key is seen.
+    // It is only used to sanity check whether we have two user keys with the same epoch.
+    last_seen_user_key_epoch_with_gap: Option<EpochWithGap>,
 }
 
 // TODO: decide whether this should also impl `HummockIterator`
@@ -79,6 +83,7 @@ impl<I: HummockIterator<Direction = Forward>> UserIterator<I> {
             stats: StoreLocalStatistic::default(),
             delete_range_iter,
             _version: version,
+            last_seen_user_key_epoch_with_gap: None,
         }
     }
 
@@ -113,6 +118,8 @@ impl<I: HummockIterator<Direction = Forward>> UserIterator<I> {
             }
 
             if self.last_key.user_key.as_ref() != full_key.user_key {
+                self.last_seen_user_key_epoch_with_gap = Some(full_key.epoch_with_gap);
+
                 // It is better to early return here if the user key is already
                 // out of range to avoid unnecessary access on the range tomestones
                 // via `delete_range_iter`.
@@ -145,6 +152,11 @@ impl<I: HummockIterator<Direction = Forward>> UserIterator<I> {
                     }
                 }
             } else {
+                if let Some(last_seen_epoch_with_gap) = self.last_seen_user_key_epoch_with_gap {
+                    // epoch_with_gap for the same user key should be monotonically decreasing during iteration
+                    assert!(last_seen_epoch_with_gap > full_key.epoch_with_gap);
+                }
+                self.last_seen_user_key_epoch_with_gap = Some(full_key.epoch_with_gap);
                 self.stats.skip_multi_version_key_count += 1;
             }
 
@@ -178,6 +190,7 @@ impl<I: HummockIterator<Direction = Forward>> UserIterator<I> {
     pub async fn rewind(&mut self) -> HummockResult<()> {
         // Reset
         self.out_of_range = false;
+        self.last_seen_user_key_epoch_with_gap = None;
 
         // Handle range scan
         match &self.key_range.0 {
@@ -219,6 +232,7 @@ impl<I: HummockIterator<Direction = Forward>> UserIterator<I> {
     pub async fn seek(&mut self, user_key: UserKey<&[u8]>) -> HummockResult<()> {
         // Reset
         self.out_of_range = false;
+        self.last_seen_user_key_epoch_with_gap = None;
 
         // Handle range scan when key < begin_key
         let user_key = match &self.key_range.0 {
