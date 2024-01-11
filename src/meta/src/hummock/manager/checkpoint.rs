@@ -21,7 +21,7 @@ use risingwave_hummock_sdk::compaction_group::hummock_version_ext::{
     object_size_map, summarize_group_deltas,
 };
 use risingwave_pb::hummock::hummock_version_checkpoint::StaleObjects;
-use risingwave_pb::hummock::{HummockVersion, HummockVersionCheckpoint};
+use risingwave_pb::hummock::{HummockVersion, HummockVersionArchive, HummockVersionCheckpoint};
 
 use crate::hummock::error::Result;
 use crate::hummock::manager::{read_lock, write_lock};
@@ -70,6 +70,21 @@ impl HummockManager {
         Ok(())
     }
 
+    pub(super) async fn write_version_archive(
+        &self,
+        archive: &HummockVersionArchive,
+    ) -> Result<()> {
+        use prost::Message;
+        let buf = archive.encode_to_vec();
+        let archive_path = format!(
+            "{}/{}",
+            self.version_archive_dir,
+            archive.version.as_ref().unwrap().id
+        );
+        self.object_store.upload(&archive_path, buf.into()).await?;
+        Ok(())
+    }
+
     /// Creates a hummock version checkpoint.
     /// Returns the diff between new and old checkpoint id.
     /// Note that this method must not be called concurrently, because internally it doesn't hold
@@ -88,44 +103,65 @@ impl HummockManager {
             return Ok(0);
         }
         let mut stale_objects = old_checkpoint.stale_objects.clone();
-        // `object_sizes` is used to calculate size of stale objects.
-        let mut object_sizes = object_size_map(old_checkpoint.version.as_ref().unwrap());
-        for (_, version_delta) in versioning
-            .hummock_version_deltas
-            .range((Excluded(old_checkpoint_id), Included(new_checkpoint_id)))
-        {
-            for group_deltas in version_delta.group_deltas.values() {
-                let summary = summarize_group_deltas(group_deltas);
-                object_sizes.extend(
-                    summary
-                        .insert_table_infos
-                        .iter()
-                        .map(|t| (t.object_id, t.file_size)),
+        let mut archive: Option<HummockVersionArchive> = None;
+        if !self.env.opts.enable_hummock_data_archive {
+            // `object_sizes` is used to calculate size of stale objects.
+            let mut object_sizes = object_size_map(old_checkpoint.version.as_ref().unwrap());
+            for (_, version_delta) in versioning
+                .hummock_version_deltas
+                .range((Excluded(old_checkpoint_id), Included(new_checkpoint_id)))
+            {
+                for group_deltas in version_delta.group_deltas.values() {
+                    let summary = summarize_group_deltas(group_deltas);
+                    object_sizes.extend(
+                        summary
+                            .insert_table_infos
+                            .iter()
+                            .map(|t| (t.object_id, t.file_size)),
+                    );
+                }
+                let removed_object_ids = version_delta.gc_object_ids.clone();
+                if removed_object_ids.is_empty() {
+                    continue;
+                }
+                let total_file_size = removed_object_ids
+                    .iter()
+                    .map(|t| object_sizes.get(t).copied().unwrap())
+                    .sum::<u64>();
+                stale_objects.insert(
+                    version_delta.id,
+                    StaleObjects {
+                        id: removed_object_ids,
+                        total_file_size,
+                    },
                 );
             }
-            let removed_object_ids = version_delta.gc_object_ids.clone();
-            if removed_object_ids.is_empty() {
-                continue;
-            }
-            let total_file_size = removed_object_ids
-                .iter()
-                .map(|t| object_sizes.get(t).copied().unwrap())
-                .sum::<u64>();
-            stale_objects.insert(
-                version_delta.id,
-                StaleObjects {
-                    id: removed_object_ids,
-                    total_file_size,
-                },
-            );
+        } else {
+            archive = Some(HummockVersionArchive {
+                version: old_checkpoint.version.clone(),
+                version_deltas: versioning
+                    .hummock_version_deltas
+                    .range((Excluded(old_checkpoint_id), Included(new_checkpoint_id)))
+                    .map(|(_, version_delta)| version_delta.clone())
+                    .collect(),
+            });
         }
         let new_checkpoint = HummockVersionCheckpoint {
             version: Some(current_version.clone()),
             stale_objects,
         };
+
         drop(versioning_guard);
         // 2. persist the new checkpoint without holding lock
         self.write_checkpoint(&new_checkpoint).await?;
+        if let Some(archive) = archive {
+            if let Err(e) = self.write_version_archive(&archive).await {
+                tracing::warn!(
+                    "failed to write version archive {}, {e}",
+                    archive.version.as_ref().unwrap().id
+                );
+            }
+        }
         // 3. hold write lock and update in memory state
         let mut versioning_guard = write_lock!(self, versioning).await;
         let versioning = versioning_guard.deref_mut();

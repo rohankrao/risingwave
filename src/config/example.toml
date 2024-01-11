@@ -20,6 +20,7 @@ periodic_compaction_interval_sec = 60
 vacuum_interval_sec = 30
 vacuum_spin_interval_ms = 10
 hummock_version_checkpoint_interval_sec = 30
+enable_hummock_data_archive = false
 min_delta_log_num_for_hummock_version_checkpoint = 10
 max_heartbeat_interval_secs = 300
 disable_recovery = false
@@ -106,7 +107,7 @@ max_version_pinning_duration_sec = 10800
 compactor_max_sst_key_count = 2097152
 compact_iter_recreate_timeout_ms = 600000
 compactor_max_sst_size = 536870912
-enable_fast_compaction = true
+enable_fast_compaction = false
 max_preload_io_retry_times = 3
 mem_table_spill_threshold = 4194304
 
