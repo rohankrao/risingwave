@@ -93,11 +93,11 @@ impl TableDistribution {
                         vnodes,
                     }
                 } else {
-                    warn!(
-                        ?vnodes,
-                        "no dist key or vnode col idx provided but provided vnodes"
+                    panic!(
+                        "no dist key or vnode col idx provided but provided vnodes: {:?}",
+                        vnodes
                     );
-                    Self::Singleton
+                    // Self::Singleton
                 }
             }
         }
