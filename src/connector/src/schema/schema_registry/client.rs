@@ -30,8 +30,8 @@ pub const SCHEMA_REGISTRY_PASSWORD: &str = "schema.registry.password";
 
 #[derive(Debug, Clone, Default)]
 pub struct SchemaRegistryAuth {
-    username: Option<String>,
-    password: Option<String>,
+    pub username: Option<String>,
+    pub password: Option<String>,
 }
 
 impl From<&HashMap<String, String>> for SchemaRegistryAuth {
@@ -62,7 +62,7 @@ pub struct Client {
 }
 
 impl Client {
-    pub(crate) fn new(url: Vec<Url>, client_config: &SchemaRegistryAuth) -> Result<Self> {
+    pub fn new(url: Vec<Url>, client_config: &SchemaRegistryAuth) -> Result<Self> {
         let valid_urls = url
             .iter()
             .map(|url| (url.cannot_be_a_base(), url))
@@ -177,9 +177,9 @@ impl Client {
     ) -> Result<(Subject, Vec<Subject>)> {
         let mut subjects = vec![];
         let mut visited = HashSet::new();
-        let mut queue = vec![(subject.to_owned(), "latest".to_owned())];
+        let mut queue = vec![(subject.to_owned(), subject.to_owned(), "latest".to_owned())];
         // use bfs to get all references
-        while let Some((subject, version)) = queue.pop() {
+        while let Some((subject, name, version)) = queue.pop() {
             let res: GetBySubjectResp = self
                 .concurrent_req(Method::GET, &["subjects", &subject, "versions", &version])
                 .await?;
@@ -189,7 +189,7 @@ impl Client {
                     content: res.schema,
                 },
                 version: res.version,
-                name: res.subject.clone(),
+                name,
             };
             subjects.push(ref_subject);
             visited.insert(res.subject);
@@ -197,7 +197,7 @@ impl Client {
                 res.references
                     .into_iter()
                     .filter(|r| !visited.contains(&r.subject))
-                    .map(|r| (r.subject, r.version.to_string())),
+                    .map(|r| (r.subject, r.name, r.version.to_string())),
             );
         }
         let origin_subject = subjects.remove(0);
