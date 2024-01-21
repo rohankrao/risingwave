@@ -62,7 +62,7 @@ pub struct Client {
 }
 
 impl Client {
-    fn new(url: Vec<Url>, client_config: &SchemaRegistryAuth) -> Result<Self> {
+    pub(crate) fn new(url: Vec<Url>, client_config: &SchemaRegistryAuth) -> Result<Self> {
         let valid_urls = url
             .iter()
             .map(|url| (url.cannot_be_a_base(), url))
