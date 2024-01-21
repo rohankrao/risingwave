@@ -30,8 +30,8 @@ pub const SCHEMA_REGISTRY_PASSWORD: &str = "schema.registry.password";
 
 #[derive(Debug, Clone, Default)]
 pub struct SchemaRegistryAuth {
-    pub username: Option<String>,
-    pub password: Option<String>,
+    username: Option<String>,
+    password: Option<String>,
 }
 
 impl From<&HashMap<String, String>> for SchemaRegistryAuth {
@@ -62,7 +62,7 @@ pub struct Client {
 }
 
 impl Client {
-    pub fn new(url: Vec<Url>, client_config: &SchemaRegistryAuth) -> Result<Self> {
+    fn new(url: Vec<Url>, client_config: &SchemaRegistryAuth) -> Result<Self> {
         let valid_urls = url
             .iter()
             .map(|url| (url.cannot_be_a_base(), url))
