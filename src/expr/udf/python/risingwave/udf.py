@@ -220,6 +220,29 @@ class UserDefinedScalarFunctionWrapper(ScalarFunction):
         return self._func(*args)
 
 
+class RichScalarFunction(ScalarFunction):
+    _func: Callable
+
+    def __init__(self, turboml_scalar_function, name, input_schema, result_schema, io_threads=None):
+        self._turboml_scalar_function = turboml_scalar_function
+        self._func = getattr(turboml_scalar_function, 'func')
+        self._input_schema = pa.schema(
+            zip(
+                inspect.getfullargspec(self._func)[0],
+                [_to_data_type(t) for t in input_schema],
+            )
+        )
+        self._result_schema = result_schema
+        self._name = name
+        super().__init__(io_threads=io_threads)
+
+    def __call__(self, *args):
+        return self._func(*args)
+
+    def eval(self, *args):
+        return self._func(*args)
+
+
 class UserDefinedTableFunctionWrapper(TableFunction):
     """
     Base Wrapper for Python user-defined table function.
