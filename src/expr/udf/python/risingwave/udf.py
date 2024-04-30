@@ -232,7 +232,7 @@ class RichScalarFunction(ScalarFunction):
                 [_to_data_type(t) for t in input_schema],
             )
         )
-        self._result_schema = result_schema
+        self._result_schema = pa.schema([("output", _to_data_type(result_schema))])
         self._name = name
         super().__init__(io_threads=io_threads)
 
